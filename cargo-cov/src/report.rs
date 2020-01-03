@@ -139,19 +139,19 @@
 
 use argparse::ReportConfig;
 use error::{Result, ResultExt};
-use sourcepath::{SourceType, identify_source_path};
+use sourcepath::{identify_source_path, SourceType};
 use template::new as new_template;
 use utils::clean_dir;
 
-use fs_extra::dir;
 use cov::{self, Gcov, Graph, Interner, Report, Symbol};
+use fs_extra::dir;
 use serde_json::Value;
 use tera::{Context, Tera};
 
 use std::ffi::OsStr;
-use std::fs::{File, create_dir_all, read_dir};
+use std::fs::{create_dir_all, read_dir, File};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Entry point of `cargo cov report` subcommand. Renders the coverage report using a template.
 pub fn generate(config: &ReportConfig) -> Result<Option<PathBuf>> {
@@ -226,15 +226,17 @@ fn render(config: &ReportConfig, report: &Report, interner: &Interner) -> Result
             let path = &interner[symbol];
             let source_type = identify_source_path(path, &workspace_str).0;
             if config.allowed_source_types.contains(source_type) {
-                Some(ReportFileEntry {
-                    symbol,
-                    source_type,
-                    path,
-                    file,
-                })
+                Some(ReportFileEntry { symbol, source_type, path, file })
             } else {
                 None
             }
+        })
+        .filter(|entry| {
+            let exists = Path::new(entry.path).exists() || config.workspace_path.join(entry.path).exists();
+            if !exists {
+                progress!("Not Found", "{}", entry.path);
+            }
+            exists
         })
         .collect::<Vec<_>>();
     report_files.sort_by_key(|entry| (entry.source_type, entry.path));
@@ -310,8 +312,13 @@ fn write_file(config: &ReportConfig, interner: &Interner, entry: &ReportFileEntr
     let mut source_line_number = 1;
 
     // Read the source file.
-    let path = config.workspace_path.join(entry.path);
-    if let Ok(source_file) = File::open(path) {
+    let path = if Path::new(entry.path).exists() {
+        Path::new(entry.path).to_path_buf()
+    } else {
+        config.workspace_path.join(entry.path)
+    };
+    if let Ok(source_file) = File::open(&path) {
+        progress!("Annotating", "{}", entry.path);
         let source_file = BufReader::new(source_file);
         for source_line in source_file.lines() {
             let (count, branches) = if let Some(line) = entry.file.lines.get(&source_line_number) {
